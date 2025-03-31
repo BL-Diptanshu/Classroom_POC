@@ -1,7 +1,6 @@
 import os
 import json
 from dotenv import load_dotenv
-from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
@@ -12,85 +11,98 @@ load_dotenv()
 CREDENTIALS_FILE = os.getenv("CREDENTIALS_FILE")
 TOKEN_FILE = os.getenv("TOKEN_FILE")
 
-if not CREDENTIALS_FILE or not TOKEN_FILE:
-    raise ValueError("Missing CREDENTIALS_FILE or TOKEN_FILE in .env file")
-
-# Google Classroom API Scopes
 SCOPES = [
     "https://www.googleapis.com/auth/classroom.courses.readonly",
-    "https://www.googleapis.com/auth/classroom.coursework.students",
-    "https://www.googleapis.com/auth/classroom.rosters.readonly"
+    "https://www.googleapis.com/auth/classroom.rosters.readonly",
+    "https://www.googleapis.com/auth/classroom.coursework.students.readonly",
+    "https://www.googleapis.com/auth/classroom.student-submissions.students.readonly"
 ]
 
 def get_credentials():
-    
+    """Authenticate and return Google API credentials."""
     creds = None
 
-    # Load token file if it exists
+    # Load token if available
     if os.path.exists(TOKEN_FILE):
-        creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+        with open(TOKEN_FILE, "r") as token:
+            creds = Credentials.from_authorized_user_info(json.load(token), SCOPES)
 
-    
+    # If no valid credentials, initiate OAuth flow
     if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
-            creds = flow.run_local_server(port=0)
-
-        # Save credentials to token file
+        flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
+        creds = flow.run_local_server(port=0)
+        
+        # Save credentials to JSON
         with open(TOKEN_FILE, "w") as token:
             token.write(creds.to_json())
 
     return creds
 
+def list_classrooms(service):
+    """Fetch and display available Google Classroom courses."""
+    results = service.courses().list().execute()
+    courses = results.get("courses", [])
 
-def list_students_and_assignments():
-    
+    if not courses:
+        print("No classrooms found.")
+        return None
+
+    print("\nAvailable Classrooms:")
+    for i, course in enumerate(courses):
+        print(f"{i + 1}. {course['name']} (ID: {course['id']})")
+
+    return courses
+
+def get_students(service, course_id):
+    """Retrieve students from the specified classroom."""
+    try:
+        results = service.courses().students().list(courseId=course_id).execute()
+        students = results.get("students", [])
+        return students
+    except Exception as e:
+        print(f"Error fetching students for course {course_id}: {e}")
+        return []
+
+def get_assignments(service, course_id):
+    """Retrieve assignments for a given classroom."""
+    try:
+        results = service.courses().courseWork().list(courseId=course_id).execute()
+        assignments = results.get("courseWork", [])
+        return assignments
+    except Exception as e:
+        print(f"Error fetching assignments for course {course_id}: {e}")
+        return []
+
+def main():
     creds = get_credentials()
     service = build("classroom", "v1", credentials=creds)
 
-    # Fetch all courses
-    courses = service.courses().list().execute().get("courses", [])
+    classrooms = list_classrooms(service)
+    if not classrooms:
+        return
 
-    for course in courses:
-        course_id = course["id"]
-        course_name = course["name"]
+    # Let user choose a classroom
+    choice = int(input("\nEnter the classroom number to access: ")) - 1
+    if 0 <= choice < len(classrooms):
+        selected_course = classrooms[choice]
+        course_id = selected_course["id"]
+        print(f"\nFetching data for classroom: {selected_course['name']}")
 
-        # Fetch students
-        students_response = service.courses().students().list(courseId=course_id).execute()
-        students = students_response.get("students", [])
-        
-        # Create a dictionary to store student names by their ID
-        student_dict = {s["userId"]: s["profile"]["name"]["fullName"] for s in students}
+        students = get_students(service, course_id)
+        assignments = get_assignments(service, course_id)
 
-        # Fetch assignments
-        assignments_response = service.courses().courseWork().list(courseId=course_id).execute()
-        assignments = assignments_response.get("courseWork", [])
+        if students:
+            print("\nStudents in the classroom:")
+            for student in students:
+                print(f"- {student['profile']['name']['fullName']} ({student['profile']['emailAddress']})")
 
-        # Fetch all student submissions per course
-        submissions_response = service.courses().courseWork().studentSubmissions().list(
-            courseId=course_id, courseWorkId="-"
-        ).execute()
-        submissions = submissions_response.get("studentSubmissions", [])
+        if assignments:
+            print("\nAssignments in the classroom:")
+            for assignment in assignments:
+                print(f"- {assignment['title']} (Due: {assignment.get('dueDate', 'N/A')})")
 
-        # Store student assignment stats in dictionary
-        student_assignments = {student_dict[s["userId"]]: {"total": 0, "turned_in": 0} for s in students}
-
-        # Process submissions and count assignments turned in
-        for submission in submissions:
-            student_id = submission["userId"]
-            state = submission.get("state", "NEW")  # Default to NEW if state is missing
-
-            if student_id in student_dict:
-                student_assignments[student_dict[student_id]]["total"] += 1
-                if state == "TURNED_IN":
-                    student_assignments[student_dict[student_id]]["turned_in"] += 1
-
-        # Prints the details of students and their assignments
-        print(f"\nCourse: {course_name}")
-        for student, stats in student_assignments.items():
-            print(f"  {student}: {stats['turned_in']}/{stats['total']} assignments turned in")
+    else:
+        print("Invalid selection.")
 
 if __name__ == "__main__":
-    list_students_and_assignments()
+    main()
